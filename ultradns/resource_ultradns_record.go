@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"regexp"
 
 	"github.com/terra-farm/udnssdk"
 	"github.com/hashicorp/terraform-plugin-sdk/helper/schema"
@@ -89,6 +90,9 @@ func resourceUltradnsRecord() *schema.Resource {
 		Read:   resourceUltraDNSRecordRead,
 		Update: resourceUltraDNSRecordUpdate,
 		Delete: resourceUltraDNSRecordDelete,
+		Importer: &schema.ResourceImporter{
+			State: resourceRecordImporter,
+		},
 
 		Schema: map[string]*schema.Schema{
 			// Required
@@ -152,8 +156,8 @@ func resourceUltraDNSRecordCreate(d *schema.ResourceData, meta interface{}) erro
 
 func resourceUltraDNSRecordRead(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*udnssdk.Client)
-
 	r, err := newRRSetResource(d)
+
 	if err != nil {
 		return err
 	}
@@ -211,4 +215,78 @@ func resourceUltraDNSRecordDelete(d *schema.ResourceData, meta interface{}) erro
 	return nil
 }
 
-// Conversion helper functions
+// resourceRecordImporter 
+func resourceRecordImporter(d *schema.ResourceData, meta interface{}) ([]*schema.ResourceData, error) {
+	value := d.Id()
+	
+	name, zone, err := resourceUltraDnsRecordParseId(value)
+
+	if err != nil {
+		return nil, err
+	}
+
+	d.Set("name", name)
+	d.Set("zone", zone)
+	return []*schema.ResourceData{d}, nil
+}
+
+// resourceUltraDnsRecordParseId takes an ID and parses it into its two constituent parts, which has two axes:
+// a name and a zone. Since the separator character used in the Id may also exist in both the name and zone
+// parts, e.g., name=app-name.domain.com and zone=domain.com, that combines to app-name.domain.com.domain.com
+// we cannot simply split on the separator character and return the corresponding parts. Instead, we iterate
+// through all the parts, reconstitute the parts to the left and right of the current index position, and test
+// whether they match a regular expression used to evaluate DNS names. We evaluate ALL the parts, not just the 
+// first one, so if no matches are found, or more than one match is found, we return an error since the Id 
+// format cannot be safely parsed 
+func resourceUltraDnsRecordParseId(id string) (string, string, error) {
+
+	re := regexp.MustCompile(`^(([a-zA-Z]{1})|([a-zA-Z]{1}[a-zA-Z]{1})|([a-zA-Z]{1}[0-9]{1})|([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z
+		]{2,3})$`)
+
+	var	matches []potentialMatch
+
+	items := strings.Split(id, ".")
+	for i, _ := range items {
+
+		// Create two mutually exclusive slices of the id segments 
+		nameTokens := items[:i]
+		zoneTokens := items[i:]
+
+		// The slices must both have values for the contents to be a valid DNS
+		// so exit if either of them does not
+		if len(nameTokens) == 0 || len(zoneTokens) == 0 {
+			continue
+		}
+
+		name := strings.Join(nameTokens, ".")
+		zone := strings.Join(zoneTokens, ".")
+
+		isNameValid := re.Match([]byte(name))
+		isZoneValid := re.Match([]byte(zone))
+
+		if (isNameValid && isZoneValid) {
+			matches = append(matches, potentialMatch{zone: zone, name: name} )
+		}
+	}
+
+	if matches == nil {
+		return "", "", fmt.Errorf("Unexpected format of ID (%q), expected name.zone", id)
+	}
+	
+	if len(matches) > 1 {
+		return "", "", fmt.Errorf("Multiple segments of ID (%q) are valid DNS names. Cannot resolve and import.", id)
+	}
+
+	return matches[0].name, matches[0].zone, nil
+}
+
+// potentialMatch stores the zone and name values parsed from the 
+// ultradns record resource id. Since the resource id may contain
+// multiple valid DNS fragments, we can use this data structure
+// to accumulate all the potential zone/name matches and proceed
+// with import only when there is a SINGLE match
+type potentialMatch struct {
+	zone string
+	name string
+}
+//Conversion helper functions

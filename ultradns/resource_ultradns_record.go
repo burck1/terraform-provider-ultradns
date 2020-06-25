@@ -45,12 +45,27 @@ func newRRSetResource(d *schema.ResourceData) (rRSetResource, error) {
 }
 
 func populateResourceDataFromRRSet(r udnssdk.RRSet, d *schema.ResourceData) error {
-	zone := d.Get("zone")
+	
 	typ := d.Get("type")
 	// ttl
 	d.Set("ttl", r.TTL)
 	// rdata
 	rdata := r.RData
+
+    if typ == "" {
+        // The RRType returned via UltraDns takes the format of record type (numeric id)
+        // For persisting the value to the state file, we should parse out only the record type
+        // and ignore the numeric id.
+        // For additional info on the record types and corresponding numeric ids, see:
+        // https://en.wikipedia.org/wiki/List_of_DNS_record_types
+        rawType := strings.Split(r.RRType, " ")
+
+        if len(rawType) != 2 {
+            return fmt.Errorf("RRSet type contained unexpected format. Expected \"RECORDTYPE (ID)\". Received %q", r.RRType)
+        }
+
+        typ = rawType[0]
+    }
 
 	// UltraDNS API returns answers double-encoded like JSON, so we must decode. This is their bug.
 	if typ == "TXT" {
@@ -67,11 +82,15 @@ func populateResourceDataFromRRSet(r udnssdk.RRSet, d *schema.ResourceData) erro
 		}
 	}
 
+	d.Set("type", typ)
+
 	err := d.Set("rdata", makeSetFromStrings(rdata))
 	if err != nil {
 		return fmt.Errorf("ultradns_record.rdata set failed: %#v", err)
 	}
+
 	// hostname
+	zone := d.Get("zone")
 	if r.OwnerName == "" {
 		d.Set("hostname", zone)
 	} else {
